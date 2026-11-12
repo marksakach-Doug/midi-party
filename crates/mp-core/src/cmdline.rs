@@ -68,6 +68,11 @@ const SPECS: &[Spec] = &[
     Spec { name: "quantize_length", args: "", aliases: &["ql"] },
     Spec { name: "set_swing", args: "<percent>", aliases: &["swing"] },
     Spec { name: "transpose_selected", args: "<semitones>", aliases: &["t", "tr", "transpose"] },
+    Spec { name: "invert_melody", args: "", aliases: &["invert melody"] },
+    Spec { name: "retrograde", args: "", aliases: &["retro"] },
+    Spec { name: "retrograde_inversion", args: "", aliases: &["retroinv"] },
+    Spec { name: "augment", args: "", aliases: &["aug"] },
+    Spec { name: "diminish", args: "", aliases: &["dim"] },
     Spec { name: "undo", args: "", aliases: &["u"] },
     Spec { name: "redo", args: "", aliases: &[] },
     Spec { name: "toggle_select_under_cursor", args: "", aliases: &[] },
@@ -487,6 +492,11 @@ pub fn parse(line: &str) -> Result<Command, CmdLineError> {
             a.at_most(1)?;
             Command::TransposeSelected { semitones: a.number(0, "semitones", "expected a number of semitones")? }
         }
+        "invert_melody" => Command::InvertMelody,
+        "retrograde" => Command::Retrograde,
+        "retrograde_inversion" => Command::RetrogradeInversion,
+        "augment" => Command::Augment,
+        "diminish" => Command::Diminish,
         "undo" => Command::Undo,
         "redo" => Command::Redo,
         "toggle_select_under_cursor" => Command::ToggleSelectUnderCursor,
@@ -725,6 +735,11 @@ pub fn to_line(cmd: &Command) -> String {
         | Command::SelectTopOfChords
         | Command::SelectBottomOfChords
         | Command::InvertSelection
+        | Command::InvertMelody
+        | Command::Retrograde
+        | Command::RetrogradeInversion
+        | Command::Augment
+        | Command::Diminish
         | Command::SelectionFocusNext
         | Command::SelectionFocusPrev
         | Command::DropFocused

@@ -93,6 +93,18 @@
 "f l"         = "keep_below_cursor"
 "f Shift+a"   = "keep_after_cursor"
 "f Shift+b"   = "keep_before_cursor"
+# contrapuntal phrase transforms (select the phrase first)
+"f i"         = "invert_melody"
+"f r"         = "retrograde"
+"f x"         = "retrograde_inversion"
+"f u"         = "augment"
+"f d"         = "diminish"
+# one-chord equivalents for keyboards where prefix sequences are awkward
+"Alt+i"       = "invert_melody"
+"Alt+r"       = "retrograde"
+"Alt+x"       = "retrograde_inversion"
+"Alt+u"       = "augment"
+"Alt+d"       = "diminish"
 
 # --- clipboard
 "c"           = "copy"

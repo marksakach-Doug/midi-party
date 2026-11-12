@@ -219,6 +219,16 @@ pub enum Command {
     /// Transpose the selected notes by `semitones`, clamped as a group to 0..=127.
     /// Needs notes. Count: multiplier.
     TransposeSelected { semitones: i32 },
+    /// Reflect selected pitches around the cursor pitch (melodic inversion).
+    InvertMelody,
+    /// Reverse the selected phrase in time, preserving note lengths.
+    Retrograde,
+    /// Reverse the phrase and reflect its pitches around the cursor pitch.
+    RetrogradeInversion,
+    /// Double selected note lengths and time gaps.
+    Augment,
+    /// Halve selected note lengths and time gaps.
+    Diminish,
     /// Undo the last edit (restores cursor and selection too). Count: repeat.
     Undo,
     /// Redo the last undone edit. Count: repeat.
@@ -504,6 +514,11 @@ impl Command {
             Command::QuantizeLength => "quantize_length",
             Command::SetSwing { .. } => "set_swing",
             Command::TransposeSelected { .. } => "transpose_selected",
+            Command::InvertMelody => "invert_melody",
+            Command::Retrograde => "retrograde",
+            Command::RetrogradeInversion => "retrograde_inversion",
+            Command::Augment => "augment",
+            Command::Diminish => "diminish",
             Command::Undo => "undo",
             Command::Redo => "redo",
             Command::ToggleSelectUnderCursor => "toggle_select_under_cursor",
@@ -637,6 +652,11 @@ impl Command {
             Command::QuantizeLength => "Round note lengths to the grid".to_string(),
             Command::SetSwing { percent } => format!("Set swing to {percent}%"),
             Command::TransposeSelected { semitones } => format!("Transpose {semitones:+} semitone(s)"),
+            Command::InvertMelody => "Invert melody around the cursor pitch".to_string(),
+            Command::Retrograde => "Reverse selected notes in time".to_string(),
+            Command::RetrogradeInversion => "Retrograde and invert selected notes".to_string(),
+            Command::Augment => "Augment selected phrase (double note lengths and gaps)".to_string(),
+            Command::Diminish => "Diminish selected phrase (halve note lengths and gaps)".to_string(),
             Command::Undo => "Undo".to_string(),
             Command::Redo => "Redo".to_string(),
             Command::ToggleSelectUnderCursor => "Toggle selection of the note under the cursor".to_string(),
@@ -788,6 +808,11 @@ impl Command {
             | Command::Quantize { .. }
             | Command::QuantizeLength
             | Command::TransposeSelected { .. }
+            | Command::InvertMelody
+            | Command::Retrograde
+            | Command::RetrogradeInversion
+            | Command::Augment
+            | Command::Diminish
             | Command::Undo
             | Command::Redo => Category::Edit,
             Command::Copy | Command::Cut | Command::Paste | Command::Duplicate => Category::Clipboard,
@@ -885,6 +910,11 @@ impl Command {
             Command::QuantizeLength,
             Command::SetSwing { percent: 0 },
             Command::TransposeSelected { semitones: 12 },
+            Command::InvertMelody,
+            Command::Retrograde,
+            Command::RetrogradeInversion,
+            Command::Augment,
+            Command::Diminish,
             Command::Undo,
             Command::Redo,
             Command::ToggleSelectUnderCursor,

@@ -16,6 +16,52 @@ for real instruments download a General MIDI bank such as **GeneralUser GS**
 (32 MB) or **MuseScore_General** (MIT) and pass it with `--sf2`, or set it per
 track with `:sf2 path/to/bank.sf2 <preset>`.
 
+## Keys
+
+Press `Shift+/` for the live cheat sheet; `Cmd+k` opens the keymap editor. The basics:
+
+| Keys | Action |
+|---|---|
+| arrows / Shift+arrows / Ctrl+Left,Right | cursor by grid step / bar & octave / beat |
+| `n`, `Shift+n` | insert a note / a major chord at the cursor (`4 n` = four grid steps long) |
+| `x`, `Delete` | delete the selection (or the note under the cursor) |
+| `s`, `v`, `Shift+v` | toggle note under cursor / box select / time-range select; `Enter` confirms |
+| `a`, `b`, `w`, `Shift+s`, `Shift+p`, `i` | select all / bar / next 4 notes / chord / same pitch / invert |
+| `Tab`, `Shift+Tab`, `Shift+x` | step through the selection, drop the focused note |
+| `f t` `f b` `f e` `f o` `f a` `f l` | keep only: top / bottom of chords, every other, on-beat, above / below cursor |
+| `f i` `f r` `f x` `f u` `f d`; or `Alt+i/r/x/u/d` | melodic inversion / retrograde / retrograde inversion / augmentation / diminution |
+| `m` then arrows | move the selected notes; `[` `]` length, `-` `=` velocity, `Alt+Left/Right` nudge off-grid |
+| `c` `p` `d` `.` | copy, paste at cursor, duplicate, repeat last edit |
+| `q`, `Shift+q`, `h`, `Shift+l` | quantize starts / lengths, humanize, legato |
+| `u` / `Shift+u` | undo / redo |
+| `g` / `Shift+g` | finer / coarser grid |
+| `t` / `Shift+t`, `Cmd+t`, `Cmd+Shift+t` | next / previous track, add track, remove track |
+| `Ctrl+m`, `Ctrl+s`, `Ctrl+=`/`-`, `Ctrl+[`/`]` | mute, solo, track volume, track pan |
+| `Ctrl+.` / `Ctrl+,` | next / previous SoundFont preset |
+| `Shift+c`, `Ctrl+Shift+Up/Down`, `Ctrl+Shift+d/u` | cycle controller lane, nudge lane value, sustain pedal down / up |
+| `Space`, `Enter` | play/stop, play from cursor |
+| `:` | command line: `:w song.ron`, `:o file.mid`, `:export out.mp3`, `:bpm 96`, `:meter 3/4`, `:vel 70..110`, `:quantize 1/8 50%`, `:rename Bass`, `:sf2 bank.sf2 33`, `:lane ramp 0..127`, `:q` |
+
+Type a number before any key to repeat it. The mouse works too: click to place
+the cursor or select, Shift+click to toggle, double-click to insert, drag to
+move, drag a note's right edge to resize, drag empty space to box-select,
+wheel to scroll, pinch or Cmd+wheel to zoom.
+
+On Linux, connect a USB MIDI keyboard from the input selector in the bottom bar,
+then click **Connect**. Incoming notes play through the selected track's
+SoundFont. **MIDI softest** sets a velocity floor (default 40), lifting quiet
+keypresses into an audible range while preserving the louder end. **Record** starts from the current transport position (or the editor
+cursor) and writes note timing and velocity into the piano roll; pitch bend,
+sustain and modulation are recorded to their controller lanes. Recorded MIDI
+edits share an undo step. The **Metronome** checkbox is enabled by default,
+accenting each bar's first beat during playback and recording. If the keyboard
+does not appear, enable the ALSA sequencer and refresh the input list.
+
+For untimed entry, use **Step record**: each MIDI key press inserts a note at
+the cursor, gives it the current grid length, and advances by one grid step.
+Change the step size with `g` / `Shift+g` before or during entry. Step recording
+does not require matching the metronome.
+
 ## Configuration
 
 On first run the app writes `keymap.toml` and `theme.toml` to its config folder:

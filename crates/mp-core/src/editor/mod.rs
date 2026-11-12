@@ -38,6 +38,9 @@ pub use command::{pan_label, Category, Command, CycleDir, Dir, Unit};
 
 use edit_ops::XorShift64;
 
+#[derive(Clone, Copy)]
+enum PhraseTransform { Invert, Retrograde, RetrogradeInversion, Augment, Diminish }
+
 /// Default velocity for inserted notes.
 pub const INSERT_VELOCITY: u8 = 100;
 /// Cursor pitch of a fresh editor (middle C).
@@ -278,6 +281,30 @@ impl Editor {
         }
     }
 
+    /// Add a performance-recorded note to the active track. Notes from one
+    /// recording pass share an undo step.
+    pub fn record_note(&mut self, start: Tick, duration: Tick, pitch: u8, velocity: u8) -> Vec<EditorEvent> {
+        if self.song.tracks.is_empty() { return Vec::new(); }
+        self.commit(Some("midi-record"));
+        let note = self.song.new_note(start, Tick(duration.get().max(1)), pitch.min(127), velocity.clamp(1, 127));
+        let index = self.track_index.min(self.song.tracks.len() - 1);
+        let track = &mut self.song.tracks[index];
+        track.notes.push(note);
+        track.sort_notes();
+        self.cursor.tick = start;
+        self.cursor.pitch = pitch.min(127);
+        vec![EditorEvent::SongChanged]
+    }
+
+    /// Record a MIDI controller value in the active track's lane.
+    pub fn record_lane_point(&mut self, kind: LaneKind, tick: Tick, value: i32) -> Vec<EditorEvent> {
+        if self.song.tracks.is_empty() { return Vec::new(); }
+        self.commit(Some("midi-record"));
+        let index = self.track_index.min(self.song.tracks.len() - 1);
+        self.song.tracks[index].lanes.set_point(kind, tick, value);
+        vec![EditorEvent::SongChanged]
+    }
+
     /// The cursor position as `bar:beat:tick`, for status strings.
     pub fn bar_beat(&self, tick: Tick) -> String {
         self.song.meter_map.bar_beat_of(self.song.ppq, tick).to_string()
@@ -368,6 +395,11 @@ impl Editor {
                 ev.push(EditorEvent::Status(format!("swing {}%", self.swing)));
             }
             Command::TransposeSelected { semitones } => self.transpose(*semitones, n, &mut ev)?,
+            Command::InvertMelody => self.transform_phrase(PhraseTransform::Invert, &mut ev)?,
+            Command::Retrograde => self.transform_phrase(PhraseTransform::Retrograde, &mut ev)?,
+            Command::RetrogradeInversion => self.transform_phrase(PhraseTransform::RetrogradeInversion, &mut ev)?,
+            Command::Augment => self.transform_phrase(PhraseTransform::Augment, &mut ev)?,
+            Command::Diminish => self.transform_phrase(PhraseTransform::Diminish, &mut ev)?,
             Command::Undo => self.undo_n(n, &mut ev)?,
             Command::Redo => self.redo_n(n, &mut ev)?,
 
@@ -1078,6 +1110,52 @@ impl Editor {
         ev.push(EditorEvent::SongChanged);
         ev.push(EditorEvent::Audition(moved));
         ev.push(EditorEvent::Status(format!("transposed {count} note{} {delta:+} st", plural(count))));
+        Ok(())
+    }
+
+    fn transform_phrase(&mut self, transform: PhraseTransform, ev: &mut Vec<EditorEvent>) -> Result<(), EditError> {
+        let ids = self.target_ids()?;
+        let notes = select::notes_with_ids(&self.song.tracks[self.track_index], &ids);
+        if notes.is_empty() { return Err(EditError::NothingSelected); }
+        let lo = notes.iter().map(|n| n.start.get()).min().unwrap_or(0);
+        let hi = notes.iter().map(|n| n.end().get()).max().unwrap_or(lo);
+        let axis = i16::from(self.cursor.pitch);
+        self.commit(None);
+        let mut changed = Vec::with_capacity(notes.len());
+        for note in self.track_mut().notes.iter_mut().filter(|note| ids.contains(&note.id)) {
+            match transform {
+                PhraseTransform::Invert | PhraseTransform::RetrogradeInversion => {
+                    note.pitch = (2 * axis - i16::from(note.pitch)).clamp(0, 127) as u8;
+                }
+                _ => {}
+            }
+            match transform {
+                PhraseTransform::Retrograde | PhraseTransform::RetrogradeInversion => {
+                    note.start = Tick(lo.saturating_add(hi.saturating_sub(note.start.get().saturating_add(note.duration.get()))));
+                }
+                PhraseTransform::Augment => {
+                    note.start = Tick(lo.saturating_add(note.start.get().saturating_sub(lo).saturating_mul(2)));
+                    note.duration = note.duration.mul(2);
+                }
+                PhraseTransform::Diminish => {
+                    note.start = Tick(lo.saturating_add(note.start.get().saturating_sub(lo) / 2));
+                    note.duration = Tick((note.duration.get() / 2).max(1));
+                }
+                _ => {}
+            }
+            changed.push(*note);
+        }
+        self.track_mut().sort_notes();
+        ev.push(EditorEvent::SongChanged);
+        ev.push(EditorEvent::Audition(changed));
+        let label = match transform {
+            PhraseTransform::Invert => "melodically inverted",
+            PhraseTransform::Retrograde => "reversed in time",
+            PhraseTransform::RetrogradeInversion => "retrograde-inverted",
+            PhraseTransform::Augment => "augmented",
+            PhraseTransform::Diminish => "diminished",
+        };
+        ev.push(EditorEvent::Status(format!("{label} {} note{}", ids.len(), plural(ids.len()))));
         Ok(())
     }
 

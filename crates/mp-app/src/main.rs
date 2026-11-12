@@ -14,6 +14,7 @@ mod instrument_picker;
 mod keymap_editor;
 #[cfg(target_os = "macos")]
 mod menu;
+mod midi_input;
 mod piano_roll;
 mod recent;
 mod theme;
@@ -31,7 +32,7 @@ use mp_audio::render::{render_song, write_audio_file, RenderOptions};
 use mp_audio::{render_song_from, SoundFontSynth, Synth};
 use mp_core::{
     cmdline, default_keymap, feed_one, midi_file, pitch_name, project, try_drive_with, Command, Cursor, DriveError,
-    Editor, EditorEvent, KeyChord, Keymap, LoopRegion, Song, Tick, TransportRequest, ViewRequest, DEFAULT_KEYMAP_TOML,
+    Editor, EditorEvent, KeyChord, Keymap, LaneKind, LoopRegion, Song, Tick, TransportRequest, ViewRequest, DEFAULT_KEYMAP_TOML,
 };
 use rustysynth::SoundFont;
 
@@ -42,6 +43,7 @@ use crate::dialogs::Unsaved;
 use crate::input::{InputState, KeyRepeat};
 use crate::instrument_picker::{Entry, InstrumentPicker, Outcome};
 use crate::keymap_editor::KeymapEditor;
+use crate::midi_input::{list_ports, MidiInputEvent, MidiInputState};
 use crate::piano_roll::{RollAction, RollView};
 use crate::theme::Theme;
 use crate::tracks_area::{TracksAction, TracksArea};
@@ -55,6 +57,13 @@ const TAP_RESET: Duration = Duration::from_secs(2);
 const TAPS_KEPT: usize = 6;
 /// The loop a song gets when the loop is switched on before one has been marked.
 const DEFAULT_LOOP_BARS: u32 = 4;
+
+/// Lift low MIDI input velocities into an audible range while preserving dynamics.
+fn normalize_midi_velocity(raw: u8, floor: u8) -> u8 {
+    let raw = raw.clamp(1, 127);
+    let floor = floor.clamp(1, 80);
+    floor + (u16::from(raw - 1) * u16::from(127 - floor) / 126) as u8
+}
 
 #[derive(Parser)]
 #[command(name = "midi-party", version)]
@@ -338,6 +347,17 @@ struct App {
     tempo_drag_at: Option<Tick>,
     /// A tempo or time signature being typed in the transport bar, and the text so far.
     value_entry: Option<(ValueField, String)>,
+    midi: MidiInputState,
+    midi_ports: Vec<String>,
+    midi_selected: usize,
+    recording: bool,
+    step_recording: bool,
+    recording_started: Option<Instant>,
+    recording_start_tick: Tick,
+    midi_velocity_floor: u8,
+    held_notes: std::collections::HashMap<u8, (Tick, u8)>,
+    live_notes: std::collections::HashSet<(usize, u8)>,
+    metronome_enabled: bool,
 }
 
 impl App {
@@ -443,8 +463,22 @@ impl App {
             taps: Vec::new(),
             tempo_drag_at: None,
             value_entry: None,
+            midi: MidiInputState::new(),
+            midi_ports: list_ports(),
+            midi_selected: 0,
+            recording: false,
+            step_recording: false,
+            recording_started: None,
+            recording_start_tick: Tick::ZERO,
+            midi_velocity_floor: 40,
+            held_notes: std::collections::HashMap::new(),
+            live_notes: std::collections::HashSet::new(),
+            metronome_enabled: true,
         };
         app.apply_events(startup_events);
+        if let Ok(audio) = &mut app.audio {
+            let _ = audio.handle.set_metronome(app.metronome_enabled);
+        }
         for command in &args.commands {
             app.run_command(command.trim_start_matches(':'));
         }
@@ -1154,6 +1188,120 @@ impl App {
         }
     }
 
+    fn record_tick_at(&self, at: Instant) -> Tick {
+        let Some(started) = self.recording_started else { return self.recording_start_tick };
+        let song = &self.editor.song;
+        let seconds = song.tempo_map.tick_to_seconds(song.ppq, self.recording_start_tick)
+            + at.saturating_duration_since(started).as_secs_f64();
+        song.tempo_map.seconds_to_tick(song.ppq, seconds)
+    }
+
+    fn start_recording(&mut self) {
+        if self.recording { return; }
+        self.step_recording = false;
+        self.recording_start_tick = self.audio.as_ref().ok().filter(|a| a.is_playing())
+            .map(|a| self.editor.song.tempo_map.seconds_to_tick(self.editor.song.ppq, a.playhead_seconds()))
+            .unwrap_or(self.editor.cursor.tick);
+        self.recording_started = Some(Instant::now());
+        self.recording = true;
+        if let Ok(audio) = &mut self.audio {
+            let _ = audio.handle.set_metronome(self.metronome_enabled);
+            let _ = audio.handle.set_recording(true);
+            if !audio.is_playing() {
+                let start = self.editor.song.tempo_map.tick_to_seconds(self.editor.song.ppq, self.recording_start_tick);
+                let _ = audio.play_from(start);
+            }
+        }
+        self.status = "MIDI recording".into();
+    }
+
+    fn stop_recording(&mut self) {
+        if !self.recording { return; }
+        let at = Instant::now();
+        let endings: Vec<(u8, Tick, u8)> = self.held_notes.drain().map(|(key, (start, velocity))| (key, start, velocity)).collect();
+        let track = self.editor.track_index;
+        if let Ok(audio) = &mut self.audio {
+            for (key, _, _) in &endings { let _ = audio.handle.live_note_off(track, *key); }
+        }
+        let end_tick = self.record_tick_at(at);
+        for (key, start, velocity) in endings {
+            let events = self.editor.record_note(start, Tick(end_tick.get().saturating_sub(start.get()).max(1)), key, velocity);
+            self.apply_events(events);
+        }
+        self.recording = false;
+        self.recording_started = None;
+        if let Ok(audio) = &mut self.audio { let _ = audio.handle.set_recording(false); }
+        self.status = "MIDI recording stopped".into();
+    }
+
+    fn start_step_recording(&mut self) {
+        if self.midi.connected_name.is_none() {
+            self.status = "connect a MIDI input before step recording".into();
+            return;
+        }
+        if self.recording { self.stop_recording(); }
+        if let Ok(audio) = &mut self.audio { let _ = audio.stop(); }
+        self.step_recording = true;
+        self.status = format!("step recording — {} notes", self.editor.grid);
+    }
+
+    fn stop_step_recording(&mut self) {
+        if !self.step_recording { return; }
+        self.step_recording = false;
+        self.status = "step recording stopped".into();
+    }
+
+    fn process_midi_input(&mut self) {
+        while let Some(event) = self.midi.try_recv() {
+            let track = self.editor.track_index;
+            match event {
+                MidiInputEvent::NoteOn { key, velocity, at } => {
+                    let velocity = normalize_midi_velocity(velocity, self.midi_velocity_floor);
+                    if let Ok(audio) = &mut self.audio { let _ = audio.handle.live_note_on(track, key, velocity); }
+                    self.live_notes.insert((track, key));
+                    if self.recording { self.held_notes.insert(key, (self.record_tick_at(at), velocity)); }
+                    else if self.step_recording {
+                        let start = self.editor.cursor.tick;
+                        let step = self.editor.grid_ticks();
+                        let events = self.editor.record_note(start, step, key, velocity);
+                        self.apply_events(events);
+                        self.editor.cursor.tick = start.saturating_add(step);
+                        self.view.ensure_cursor_visible(&self.editor, self.roll_rect);
+                        self.status = format!("step note — next {}", self.editor.bar_beat(self.editor.cursor.tick));
+                    }
+                }
+                MidiInputEvent::NoteOff { key, at } => {
+                    if let Ok(audio) = &mut self.audio { let _ = audio.handle.live_note_off(track, key); }
+                    self.live_notes.remove(&(track, key));
+                    if self.recording {
+                        if let Some((start, velocity)) = self.held_notes.remove(&key) {
+                            let end = self.record_tick_at(at);
+                            let events = self.editor.record_note(start, Tick(end.get().saturating_sub(start.get()).max(1)), key, velocity);
+                            self.apply_events(events);
+                        }
+                    }
+                }
+                MidiInputEvent::ControlChange { controller, value, at } => {
+                    if let Ok(audio) = &mut self.audio { let _ = audio.handle.live_control_change(track, controller, value); }
+                    if self.recording {
+                        let kind = match controller { 64 => Some(LaneKind::Sustain), 1 => Some(LaneKind::ModWheel), _ => None };
+                        if let Some(kind) = kind {
+                            let events = self.editor.record_lane_point(kind, self.record_tick_at(at), value as i32);
+                            self.apply_events(events);
+                        }
+                    }
+                }
+                MidiInputEvent::PitchBend { value, at } => {
+                    if let Ok(audio) = &mut self.audio { let _ = audio.handle.live_pitch_bend(track, (value + 8192).clamp(0, 16383) as u16); }
+                    if self.recording {
+                        let events = self.editor.record_lane_point(LaneKind::PitchBend, self.record_tick_at(at), value);
+                        self.apply_events(events);
+                    }
+                }
+            }
+        }
+    }
+
     // ----- command line -----
 
     fn handle_cmdline_chord(&mut self, text: &str, ctx: &egui::Context) {
@@ -1540,7 +1688,66 @@ impl App {
 
     /// One line of cells separated by thin rules: where the cursor is, then the
     /// editing context, the latest message on the right.
-    fn draw_status_bar(&self, ui: &mut egui::Ui) {
+    fn draw_status_bar(&mut self, ui: &mut egui::Ui) {
+        let repaint_ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            ui.label("MIDI softest");
+            ui.add(egui::Slider::new(&mut self.midi_velocity_floor, 1..=80).show_value(true));
+            ui.label("(velocity floor)");
+            self.metronome_enabled = self.metronome;
+            if ui.checkbox(&mut self.metronome_enabled, "Metronome").changed() {
+                self.metronome = self.metronome_enabled;
+                if let Ok(audio) = &mut self.audio {
+                    let _ = audio.handle.set_metronome(self.metronome_enabled);
+                }
+            }
+            egui::ComboBox::from_id_salt("midi-input-select")
+                .selected_text(self.midi.connected_name.as_deref().unwrap_or_else(|| self.midi_ports.get(self.midi_selected).map(String::as_str).unwrap_or("No MIDI input")))
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    for (i, port) in self.midi_ports.iter().enumerate() {
+                        ui.selectable_value(&mut self.midi_selected, i, port);
+                    }
+                });
+            if ui.small_button("Refresh MIDI").clicked() {
+                self.midi_ports = list_ports();
+                self.midi_selected = self.midi_selected.min(self.midi_ports.len().saturating_sub(1));
+            }
+            if self.midi.connected_name.is_some() {
+                if ui.small_button("Disconnect").clicked() {
+                    if self.recording { self.stop_recording(); }
+                    if self.step_recording { self.stop_step_recording(); }
+                    let active: Vec<_> = self.live_notes.drain().collect();
+                    if let Ok(audio) = &mut self.audio {
+                        for (track, key) in active { let _ = audio.handle.live_note_off(track, key); }
+                        let track = self.editor.track_index;
+                        let _ = audio.handle.live_control_change(track, 64, 0);
+                        let _ = audio.handle.live_control_change(track, 1, 0);
+                        let _ = audio.handle.live_pitch_bend(track, 8192);
+                    }
+                    self.midi.disconnect();
+                }
+            } else if ui.small_button("Connect").clicked() {
+                match self.midi.connect(self.midi_selected, repaint_ctx.clone()) {
+                    Ok(()) => self.status = format!("MIDI connected: {}", self.midi.connected_name.as_deref().unwrap_or("input")),
+                    Err(error) => self.status = format!("MIDI input error: {error}"),
+                }
+            }
+            if self.recording {
+                if ui.button("■ Stop recording").clicked() { self.stop_recording(); }
+            } else if self.step_recording {
+                if ui.button("■ Stop step").clicked() { self.stop_step_recording(); }
+            } else {
+                if ui.button("● Record").clicked() {
+                    if self.midi.connected_name.is_none() {
+                        self.status = "connect a MIDI input before recording".into();
+                    } else {
+                        self.start_recording();
+                    }
+                }
+                if ui.button("▶ Step record").clicked() { self.start_step_recording(); }
+            }
+        });
         let theme = &self.theme;
         let mono = theme.font(theme.font_size);
         let label_font = theme.font(theme.font_size - 3.0);
@@ -1645,6 +1852,7 @@ impl eframe::App for App {
             self.input.clear();
         }
         let polled = self.input.poll(&ctx, now);
+        self.process_midi_input();
         for chord in polled.chords {
             self.handle_key(&chord.to_string(), &ctx);
         }

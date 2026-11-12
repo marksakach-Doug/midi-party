@@ -36,6 +36,10 @@ pub enum AudioCmd {
     Seek { frame: u64 },
     /// Play one note outside the timeline (the "hear edits" feature).
     Audition { track: usize, key: u8, velocity: u8, duration_frames: u32 },
+    LiveNoteOn { track: usize, key: u8, velocity: u8 },
+    LiveNoteOff { track: usize, key: u8 },
+    LiveControlChange { track: usize, controller: u8, value: u8 },
+    LivePitchBend { track: usize, value: u16 },
     /// Install (or replace) the instrument for a track.
     SetSynth { track: usize, synth: Box<dyn Synth> },
     /// Install (or replace) the synth that previews sounds outside the song.
@@ -45,6 +49,7 @@ pub enum AudioCmd {
     SetMasterGain(f32),
     /// Click on every beat while playing.
     SetMetronome(bool),
+    SetRecording(bool),
 }
 
 /// The audition slot owner that stands for the preview synth rather than a track.
@@ -171,12 +176,14 @@ pub struct Engine {
     transport: Arc<Transport>,
     playing: bool,
     stop_at_end: bool,
+    recording: bool,
+    /// Click on every beat while playing.
+    metronome: bool,
+    click: Click,
     /// Total frames ever rendered; drives audition note-offs.
     clock: u64,
     auditions: [Option<Audition>; MAX_AUDITIONS],
     master_gain: f32,
-    metronome: bool,
-    click: Click,
     scratch_l: [f32; SUB_BLOCK],
     scratch_r: [f32; SUB_BLOCK],
 }
@@ -218,11 +225,12 @@ pub fn create_engine(sample_rate: u32, stop_at_end: bool) -> (Engine, EngineHand
         transport: Arc::clone(&transport),
         playing: false,
         stop_at_end,
+        recording: false,
+        metronome: false,
+        click: Click::default(),
         clock: 0,
         auditions: [None; MAX_AUDITIONS],
         master_gain: 1.0,
-        metronome: false,
-        click: Click::default(),
         scratch_l: [0.0; SUB_BLOCK],
         scratch_r: [0.0; SUB_BLOCK],
     };
@@ -330,7 +338,7 @@ impl Engine {
             self.transport.playhead_frame.store(self.sequencer.frame(), Ordering::Relaxed);
             let end = self.song.length + END_TAIL_SECONDS;
             let loop_ahead = self.loop_frames().is_some_and(|(_, end)| self.sequencer.frame() < end);
-            let keeps_going = self.metronome || loop_ahead;
+            let keeps_going = self.metronome || loop_ahead || self.recording;
             if self.stop_at_end && !keeps_going && self.sequencer.seconds(self.sample_rate) >= end {
                 self.stop();
             }
@@ -374,6 +382,24 @@ impl Engine {
                         }
                     }
                 }
+                AudioCmd::LiveNoteOn { track, key, velocity } => {
+                    let channel = self.song.tracks.get(track).map(|t| t.channel).unwrap_or(0);
+                    if let Some(Some(synth)) = self.synths.get_mut(track) { synth.note_on(channel, key, velocity); }
+                }
+                AudioCmd::LiveNoteOff { track, key } => {
+                    let channel = self.song.tracks.get(track).map(|t| t.channel).unwrap_or(0);
+                    if let Some(Some(synth)) = self.synths.get_mut(track) { synth.note_off(channel, key); }
+                }
+                AudioCmd::LiveControlChange { track, controller, value } => {
+                    let channel = self.song.tracks.get(track).map(|t| t.channel).unwrap_or(0);
+                    if let Some(Some(synth)) = self.synths.get_mut(track) { synth.control_change(channel, controller, value); }
+                }
+                AudioCmd::LivePitchBend { track, value } => {
+                    let channel = self.song.tracks.get(track).map(|t| t.channel).unwrap_or(0);
+                    if let Some(Some(synth)) = self.synths.get_mut(track) { synth.pitch_bend(channel, value); }
+                }
+                AudioCmd::SetMetronome(enabled) => self.metronome = enabled,
+                AudioCmd::SetRecording(recording) => self.recording = recording,
                 AudioCmd::SetSynth { track, synth } => {
                     let old = match self.synths.get_mut(track) {
                         Some(slot) => slot.replace(synth),
@@ -403,7 +429,6 @@ impl Engine {
                     }
                 }
                 AudioCmd::SetMasterGain(gain) => self.master_gain = gain.max(0.0),
-                AudioCmd::SetMetronome(on) => self.metronome = on,
             }
         }
     }
@@ -499,6 +524,7 @@ impl Engine {
             }
         }
     }
+
 }
 
 impl EngineHandle {
@@ -547,6 +573,30 @@ impl EngineHandle {
         self.send(AudioCmd::Audition { track, key, velocity, duration_frames })
     }
 
+    pub fn live_note_on(&mut self, track: usize, key: u8, velocity: u8) -> Result<(), AudioError> {
+        self.send(AudioCmd::LiveNoteOn { track, key, velocity })
+    }
+
+    pub fn live_note_off(&mut self, track: usize, key: u8) -> Result<(), AudioError> {
+        self.send(AudioCmd::LiveNoteOff { track, key })
+    }
+
+    pub fn live_control_change(&mut self, track: usize, controller: u8, value: u8) -> Result<(), AudioError> {
+        self.send(AudioCmd::LiveControlChange { track, controller, value })
+    }
+
+    pub fn live_pitch_bend(&mut self, track: usize, value: u16) -> Result<(), AudioError> {
+        self.send(AudioCmd::LivePitchBend { track, value })
+    }
+
+    pub fn set_metronome(&mut self, enabled: bool) -> Result<(), AudioError> {
+        self.send(AudioCmd::SetMetronome(enabled))
+    }
+
+    pub fn set_recording(&mut self, recording: bool) -> Result<(), AudioError> {
+        self.send(AudioCmd::SetRecording(recording))
+    }
+
     pub fn set_synth(&mut self, track: usize, synth: Box<dyn Synth>) -> Result<(), AudioError> {
         if track >= MAX_TRACKS {
             return Err(AudioError::TrackOutOfRange(track));
@@ -574,10 +624,6 @@ impl EngineHandle {
 
     pub fn set_master_gain(&mut self, gain: f32) -> Result<(), AudioError> {
         self.send(AudioCmd::SetMasterGain(gain))
-    }
-
-    pub fn set_metronome(&mut self, on: bool) -> Result<(), AudioError> {
-        self.send(AudioCmd::SetMetronome(on))
     }
 
     /// Frees whatever the audio thread handed back. Call once per UI frame.

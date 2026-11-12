@@ -2513,6 +2513,7 @@ dependencies = [
 name = "mp-app"
 version = "0.1.0"
 dependencies = [
+ "alsa",
  "clap",
  "dirs",
  "eframe",
